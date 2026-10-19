@@ -4,11 +4,25 @@ import { ZcodeReader } from '../src/main/core/zcode/reader'
 import { Observer } from '../src/main/core/observer'
 import { getGitEvidence } from '../src/main/core/git'
 import { preparePack, type PackContext } from '../src/main/core/handoff'
-import { buildRecoveryBrief, recoveryMarkdown } from '../src/main/core/recovery'
+import { buildRecoveryBrief, recoveryMarkdown, isFollowUpMessage, selectEffectiveGoal } from '../src/main/core/recovery'
 import { createZcodeFixture, type Fixture } from './fixtures/zcode'
 import type { Logger } from '../src/main/core/log'
+import type { TimelineItem } from '../src/shared/types'
 
 const silentLogger = { info: () => undefined, warn: () => undefined, error: () => undefined } as unknown as Logger
+
+function userItem(id: string, text: string, time: number): TimelineItem {
+  return {
+    id,
+    sessionId: 'sess_test',
+    kind: 'user',
+    time,
+    messageId: id,
+    turnId: id,
+    sequence: 0,
+    text
+  }
+}
 
 describe('recovery brief for a stalled session', () => {
   let fixture: Fixture
@@ -53,7 +67,7 @@ describe('recovery brief for a stalled session', () => {
     const brief = buildRecoveryBrief(ctx)
     expect(brief.latestGoal).toContain('补充：只验收登录流程')
     expect(brief.olderRequirements).toContain('实现登录页并跑测试')
-    expect(brief.olderRequirements).toContain('可能已经失效')
+    expect(brief.olderRequirements).toContain('可能仍然有效')
 
     expect(brief.completedEvidence).toContain('实现登录表单')
     expect(brief.completedEvidence).toContain('退出码 0')
@@ -67,6 +81,48 @@ describe('recovery brief for a stalled session', () => {
     expect(brief.nextActions).toContain('补登录测试')
     expect(brief.nextActions).toContain('更新 README')
     expect(brief.incompleteTodos).toHaveLength(3)
+  })
+
+  it('skips trailing control messages when selecting the effective goal', () => {
+    const users = [
+      userItem('u1', '实现登录页并跑测试。', 1),
+      userItem('u2', '补充：只验收登录流程。', 2),
+      userItem('u3', '继续完成任务。', 3),
+      userItem('u4', '现在怎么样了？', 4)
+    ]
+    const selection = selectEffectiveGoal(users)
+    expect(selection.goal?.text).toContain('只验收登录流程')
+    expect(selection.trailing.map((item) => item.text)).toEqual(['继续完成任务。', '现在怎么样了？'])
+    expect(selection.older.map((item) => item.text)).toContain('实现登录页并跑测试。')
+  })
+
+  it('keeps a short specific instruction as substantive', () => {
+    expect(isFollowUpMessage('改红色')).toBe(false)
+    expect(isFollowUpMessage('继续做登录页')).toBe(false)
+    expect(isFollowUpMessage('继续完成任务。')).toBe(true)
+    expect(isFollowUpMessage('现在怎么样了？')).toBe(true)
+    const selection = selectEffectiveGoal([userItem('u1', '实现登录页', 1), userItem('u2', '改红色', 2)])
+    expect(selection.goal?.text).toBe('改红色')
+  })
+
+  it('marks an all-control conversation instead of pretending a goal exists', () => {
+    const selection = selectEffectiveGoal([userItem('u1', '继续', 1), userItem('u2', '现在怎么样了', 2)])
+    expect(selection.goal?.text).toBe('继续')
+    expect(selection.goalIsFollowUp).toBe(true)
+    expect(selection.trailing).toHaveLength(1)
+  })
+
+  it('does not let a trailing 继续 replace the real goal in the brief', () => {
+    const controls = [
+      userItem('u-continue', '继续完成任务。', Date.now() + 10_000),
+      userItem('u-status', '现在怎么样了？', Date.now() + 10_001)
+    ]
+    const brief = buildRecoveryBrief({ ...ctx, timeline: [...ctx.timeline, ...controls] })
+    expect(brief.latestGoal).toContain('补充：只验收登录流程')
+    expect(brief.latestGoal).toContain('控制/进度消息')
+    expect(brief.olderRequirements).toContain('实现登录页')
+    expect(brief.olderRequirements).toContain('可能仍然有效')
+    expect(brief.olderRequirements).not.toContain('可能已经失效')
   })
 
   it('detects context overflow, unfinished todos and model errors', () => {

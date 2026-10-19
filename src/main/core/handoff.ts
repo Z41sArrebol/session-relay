@@ -20,7 +20,7 @@ import type {
 import { SUMMARY_SECTIONS } from '../../shared/types'
 import type { StoredAttachedRow, TurnMetaRow } from './state'
 import { getDiffs } from './git'
-import { buildRecoveryBrief } from './recovery'
+import { buildRecoveryBrief, selectEffectiveGoal } from './recovery'
 import {
   assertRealInside,
   assertRegularFileNoSymlink,
@@ -263,8 +263,9 @@ export function deterministicSections(ctx: PackContext, recovery?: RecoveryBrief
   const tools = ctx.timeline.filter((i) => i.kind === 'tool')
   const finalClaims = assistants.filter((i) => i.isFinalStatement)
   const errors = tools.filter((i) => i.status === 'error' || i.exitCode !== null && i.exitCode !== 0)
-  const firstUser = users[0]?.text || '(没有采集到真实用户要求)'
-  const later = users.slice(1)
+  // Substantive requirements only; trailing "继续 / 进度" controls are not
+  // amendments to the task and must not replace the effective goal.
+  const later = selectEffectiveGoal(users).older
   const lastAssistant = assistants[assistants.length - 1]?.text || '(没有公开回复)'
   const allFiles = [...ctx.git.buckets.staged, ...ctx.git.buckets.unstaged, ...ctx.git.buckets.untracked]
   const dedup = new Map<string, GitFile>()

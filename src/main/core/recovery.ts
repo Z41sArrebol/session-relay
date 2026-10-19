@@ -49,6 +49,56 @@ function allGitFiles(ctx: PackContext): GitFile[] {
   return [...map.values()]
 }
 
+const FOLLOW_UP_PATTERNS: RegExp[] = [
+  /^(继续|接着|往下|然后|下一步|然后呢)[。.!！,，\s]*$/,
+  /^(继续|接着)(做|完成|执行|干活|工作)[。.!！\s]*$/,
+  /^继续完成任务[。.!！\s]*$/,
+  /^(go\s*on|continue|keep\s*going)[。.!！\s]*$/i,
+  /^(现在|目前)?(怎么样了|怎么样|如何|到哪了|做到哪了|进度如何|进展如何|进度|进展|呢)[。.!！?？\s]*$/,
+  /^(好了吗|完成了吗|可以了吗|行了吗|结束了吗)[。.!！?？\s]*$/,
+  /^(ok|okay|好|好的|行|可以|收到|嗯|对|是|是的|没问题)[。.!！,，\s]*$/i,
+  /^(好|可以|行|嗯|ok)[，,。\s]*(继续|接着|往下)/i,
+  /^[?？.。…\s]+$/
+]
+
+/**
+ * "继续" / "现在怎么样了" are control messages, not a new goal. They must not
+ * replace the last substantive requirement, otherwise the receiver loses the
+ * actual task. Short specific instructions ("改红色") are still substantive.
+ */
+export function isFollowUpMessage(text: string): boolean {
+  const trimmed = (text || '').trim()
+  if (!trimmed) return true
+  if (trimmed.length > 80) return false
+  return FOLLOW_UP_PATTERNS.some((re) => re.test(trimmed))
+}
+
+export interface EffectiveGoalSelection {
+  goal: TimelineItem | null
+  older: TimelineItem[]
+  trailing: TimelineItem[]
+  goalIsFollowUp: boolean
+}
+
+export function selectEffectiveGoal(users: TimelineItem[]): EffectiveGoalSelection {
+  if (!users.length) return { goal: null, older: [], trailing: [], goalIsFollowUp: false }
+  let index = -1
+  for (let i = users.length - 1; i >= 0; i--) {
+    if (!isFollowUpMessage(users[i].text || '')) {
+      index = i
+      break
+    }
+  }
+  const goalIsFollowUp = index < 0
+  if (index < 0) index = 0
+  return {
+    goal: users[index],
+    older: users.slice(0, index).filter((u) => !isFollowUpMessage(u.text || '')),
+    trailing: users.slice(index + 1),
+    goalIsFollowUp
+  }
+}
+
 function isIncomplete(todo: TodoItem): boolean {
   return todo.status !== 'completed'
 }
@@ -67,8 +117,7 @@ export function buildRecoveryBrief(ctx: PackContext): RecoveryBrief {
   const turns = ctx.turns || []
   const incompleteTodos = todos.filter(isIncomplete).sort((a, b) => todoRank(a) - todoRank(b) || a.position - b.position)
   const completedTodos = todos.filter((t) => t.status === 'completed')
-  const latest = users[users.length - 1] || null
-  const older = users.slice(0, -1)
+  const goalSelection = selectEffectiveGoal(users)
 
   const signals: RecoverySignal[] = []
   const contextExceeded = turns.filter((t) => t.contextExceeded)
@@ -293,20 +342,33 @@ export function buildRecoveryBrief(ctx: PackContext): RecoveryBrief {
         ? 'medium'
         : 'low'
 
+  const goal = goalSelection.goal
+  const trailingGoalNote = goalSelection.trailing.length
+    ? `\n\n末尾还有 ${goalSelection.trailing.length} 条控制/进度消息，未当作新目标：${goalSelection.trailing
+        .slice(-3)
+        .map((item) => `「${cap(item.text || '', 80)}」`)
+        .join('、')}`
+    : ''
+  const goalPrefix = goalSelection.goalIsFollowUp
+    ? '没有找到实质性要求；以下是最早一条用户消息，可能只是控制指令，请人工确认目标。\n\n'
+    : ''
+
   return {
     sessionId: ctx.row.sessionId,
     generatedAt: Date.now(),
     confidence,
     signals,
-    latestGoal: latest
-      ? `${cap(latest.text || '', 6000)}\n\n（最后一条真实用户要求，${iso(latest.time)}；引用 [M:${latest.messageId}]）`
+    latestGoal: goal
+      ? `${goalPrefix}${cap(goal.text || '', 6000)}\n\n（最后一条实质性用户要求，${iso(
+          goal.time
+        )}；引用 [M:${goal.messageId}]）${trailingGoalNote}`
       : '没有采集到真实用户要求。',
-    olderRequirements: older.length
-      ? older
-          .slice(-4)
+    olderRequirements: goalSelection.older.length
+      ? goalSelection.older
+          .slice(-6)
           .map((i, index) => `${index + 1}. ${iso(i.time)}：${cap(i.text || '', 1200)} [M:${i.messageId}]`)
-          .join('\n\n') + '\n\n以上是较早要求，可能已经失效；以最新一条为准，接手前需要用户确认。'
-      : '没有更早的用户要求，或只采集到一条。',
+          .join('\n\n') + '\n\n这些是较早的实质性要求，可能仍然有效；请与最新目标一起核对，不要只看最后一句。'
+      : '没有更早的实质性要求。',
     completedEvidence: completedEvidence.join('\n'),
     failedAttempts: failedLines.join('\n'),
     workspaceConsistency: workspaceLines.join('\n'),
