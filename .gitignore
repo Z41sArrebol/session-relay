@@ -1,0 +1,8 @@
+node_modules/
+out/
+out-types/
+.tmp/
+*.log
+.DS_Store
+docs/demo/real-handoff-*
+docs/demo/real-handoff-check.json
