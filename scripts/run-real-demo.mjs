@@ -39,7 +39,7 @@ const run = spawnSync(electron, [outfile], {
     ...process.env,
     ELECTRON_RUN_AS_NODE: '1',
     SESSION_RELAY_REAL_SESSION:
-      process.env.SESSION_RELAY_REAL_SESSION || 'sess_88d1faa6-6aa0-4cac-95e6-972300a76d84'
+      process.env.SESSION_RELAY_REAL_SESSION || process.env.SESSION_RELAY_REAL_SESSION || ''
   }
 })
 process.exit(run.status ?? 1)
