@@ -4,12 +4,38 @@ import { ZcodeReader } from '../src/main/core/zcode/reader'
 import { Observer } from '../src/main/core/observer'
 import { getGitEvidence } from '../src/main/core/git'
 import { preparePack, type PackContext } from '../src/main/core/handoff'
-import { buildRecoveryBrief, recoveryMarkdown, isFollowUpMessage, selectEffectiveGoal } from '../src/main/core/recovery'
+import {
+  buildRecoveryBrief,
+  recoveryMarkdown,
+  isFollowUpMessage,
+  selectEffectiveGoal,
+  classifyFailures,
+  selectRecommendedFailure,
+  failureGuidance
+} from '../src/main/core/recovery'
 import { createZcodeFixture, type Fixture } from './fixtures/zcode'
 import type { Logger } from '../src/main/core/log'
 import type { TimelineItem } from '../src/shared/types'
 
 const silentLogger = { info: () => undefined, warn: () => undefined, error: () => undefined } as unknown as Logger
+
+function toolItem(id: string, command: string, time: number, exitCode: number | null, status: 'completed' | 'error' = 'completed'): TimelineItem {
+  return {
+    id,
+    sessionId: 'sess_test',
+    kind: 'tool',
+    time,
+    messageId: `m-${id}`,
+    partId: id,
+    turnId: 'turn',
+    sequence: 0,
+    toolName: 'Bash',
+    callId: id,
+    input: { command },
+    status,
+    exitCode
+  }
+}
 
 function userItem(id: string, text: string, time: number): TimelineItem {
   return {
@@ -23,6 +49,74 @@ function userItem(id: string, text: string, time: number): TimelineItem {
     text
   }
 }
+
+describe('failure guidance', () => {
+  const goalTime = 500
+  const tools = [
+    toolItem('old-python', 'python -c "sqlite3 db.sqlite"', 100, 1, 'error'),
+    toolItem('lint', 'npm run lint', 600, 1, 'error'),
+    toolItem('typecheck', 'npm run typecheck', 700, 1, 'error'),
+    toolItem('build-fail', 'npm run build', 800, 1, 'error'),
+    toolItem('build-ok', 'npm run build', 900, 0, 'completed')
+  ]
+
+  it('does not recommend a historical exploratory failure', () => {
+    const records = classifyFailures(tools, goalTime)
+    const recommended = selectRecommendedFailure(records, { incompleteTodos: [], changedFiles: [] })
+    expect(recommended?.item.id).toBe('typecheck')
+    expect(recommended?.item.id).not.toBe('old-python')
+    expect(failureGuidance(recommended, 1)).not.toContain('python')
+  })
+
+  it('marks a failure resolved by a later same-family success', () => {
+    const records = classifyFailures(tools, goalTime)
+    const build = records.find((record) => record.item.id === 'build-fail')
+    expect(build?.resolvedBy?.id).toBe('build-ok')
+  })
+
+  it('picks the latest unresolved current failure, not the earliest', () => {
+    const records = classifyFailures(tools, goalTime)
+    const recommended = selectRecommendedFailure(records, { incompleteTodos: [], changedFiles: [] })
+    expect(recommended?.item.id).toBe('typecheck')
+    expect(failureGuidance(recommended, 0)).toContain('npm run typecheck')
+    expect(failureGuidance(recommended, 0)).toContain('当前目标内最近一条')
+  })
+
+  it('does not truncate a long command into a runnable snippet', () => {
+    const long = toolItem('long', `npm run ${'x'.repeat(400)}`, 1000, 1, 'error')
+    const records = classifyFailures([long], goalTime)
+    const recommended = selectRecommendedFailure(records, { incompleteTodos: [], changedFiles: [] })
+    const guidance = failureGuidance(recommended, 0)!
+    expect(guidance).toContain('命令较长')
+    expect(guidance).toContain('完整执行记录')
+    expect(guidance).not.toContain('…[截断]')
+  })
+
+  it('renders a multi-line failure command as a single line', () => {
+    const multi = toolItem(
+      'multi',
+      `cd /x && python -c "
+import sqlite3
+print(1)"`,
+      1000,
+      1,
+      'error'
+    )
+    const recommended = selectRecommendedFailure(classifyFailures([multi], 500), {
+      incompleteTodos: [],
+      changedFiles: []
+    })
+    const guidance = failureGuidance(recommended, 0)!
+    expect(guidance.includes(String.fromCharCode(10))).toBe(false)
+    expect(guidance).toContain('python -c')
+  })
+
+  it('mentions historical unresolved failures instead of recommending them', () => {
+    const records = classifyFailures([toolItem('old-python', 'python -c "sqlite3 db.sqlite"', 100, 1, 'error')], goalTime)
+    expect(selectRecommendedFailure(records, { incompleteTodos: [], changedFiles: [] })).toBeNull()
+    expect(failureGuidance(null, 1)).toContain('不要直接重跑')
+  })
+})
 
 describe('recovery brief for a stalled session', () => {
   let fixture: Fixture

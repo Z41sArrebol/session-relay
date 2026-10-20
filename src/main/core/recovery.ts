@@ -99,6 +99,117 @@ export function selectEffectiveGoal(users: TimelineItem[]): EffectiveGoalSelecti
   }
 }
 
+export type FailureFamily = 'test' | 'build' | 'lint' | 'typecheck'
+
+export interface FailureRecord {
+  item: TimelineItem
+  command: string
+  normalized: string
+  family: FailureFamily | null
+  resolvedBy: TimelineItem | null
+  afterGoal: boolean
+  exploratory: boolean
+}
+
+function normalizeCommand(command: string): string {
+  return command
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/^cd\s+[^&]+&&\s*/i, '')
+}
+
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+function commandFamily(command: string): FailureFamily | null {
+  if (/\b(npm|pnpm|yarn|bun)\s+(run\s+)?test\b|\b(vitest|jest|pytest|go\s+test|cargo\s+test|dotnet\s+test)\b/i.test(command)) return 'test'
+  if (/\b(npm|pnpm|yarn|bun)\s+(run\s+)?build\b|\b(vite\s+build|cargo\s+build|go\s+build|dotnet\s+build)\b/i.test(command)) return 'build'
+  if (/\b(npm|pnpm|yarn|bun)\s+(run\s+)?lint\b|\b(eslint|ruff|flake8|golangci-lint)\b/i.test(command)) return 'lint'
+  if (/\b(tsc|typecheck|mypy)\b/i.test(command)) return 'typecheck'
+  return null
+}
+
+function isExploratoryCommand(command: string): boolean {
+  const trimmed = command.trim()
+  return (
+    /^(python3?|node)\s+-[ce]\b/i.test(trimmed) ||
+    /\bsqlite3\b/i.test(trimmed) ||
+    /^(grep|rg|find|ls|dir|cat|head|tail|type)\b/i.test(trimmed)
+  )
+}
+
+/**
+ * Classify failed tool calls, but keep "historic" failures separate from the
+ * current task. A historic exploratory command must not become the receiver's
+ * next action just because it never succeeded.
+ */
+export function classifyFailures(tools: TimelineItem[], goalTime: number): FailureRecord[] {
+  const failures = tools
+    .filter((item) => item.status === 'error' || (item.exitCode !== null && item.exitCode !== undefined && item.exitCode !== 0))
+    .sort((a, b) => a.time - b.time)
+  return failures.map((item) => {
+    const command = commandOf(item)
+    const normalized = normalizeCommand(command)
+    const family = commandFamily(command)
+    const targetFile = filePathOf(item)
+    const resolvedBy =
+      tools.find((later) => {
+        if (later.time <= item.time || later.status !== 'completed') return false
+        if (later.exitCode !== null && later.exitCode !== undefined && later.exitCode !== 0) return false
+        const laterCommand = normalizeCommand(commandOf(later))
+        if (normalized && laterCommand === normalized) return true
+        if (family && commandFamily(commandOf(later)) === family) return true
+        const laterFile = filePathOf(later)
+        return Boolean(targetFile && laterFile && targetFile === laterFile)
+      }) || null
+    return {
+      item,
+      command,
+      normalized,
+      family,
+      resolvedBy,
+      afterGoal: goalTime <= 0 || item.time >= goalTime,
+      exploratory: isExploratoryCommand(command)
+    }
+  })
+}
+
+export interface FailureSelectionContext {
+  incompleteTodos: TodoItem[]
+  changedFiles: string[]
+}
+
+export function selectRecommendedFailure(records: FailureRecord[], ctx: FailureSelectionContext): FailureRecord | null {
+  const current = records.filter((record) => !record.resolvedBy && record.afterGoal)
+  if (!current.length) return null
+  const todoText = ctx.incompleteTodos.map((todo) => todo.content).join(' ')
+  const score = (record: FailureRecord): number => {
+    let value = 100
+    if (record.family) value += 20
+    if (!record.exploratory) value += 20
+    if (ctx.changedFiles.some((file) => record.command.includes(file))) value += 15
+    if (todoText && record.command && todoText.includes(record.command.slice(0, 24))) value += 10
+    return value
+  }
+  return [...current].sort((a, b) => score(b) - score(a) || b.item.time - a.item.time)[0] || null
+}
+
+export function failureGuidance(record: FailureRecord | null, historicalUnresolved: number): string | null {
+  if (record) {
+    const ref = `[T:${record.item.callId || record.item.id}]`
+    const command = oneLine(record.command)
+    if (command.length <= 300) {
+      return `- 当前目标内最近一条未解决失败（${iso(record.item.time)}）：\`${command}\` ${ref}；先确认它是否仍与剩余待办有关。`
+    }
+    return `- 当前目标内最近一条未解决失败的命令较长（${command.length} 字符），不在此处截断；请查看 ${ref} 的完整执行记录。`
+  }
+  if (historicalUnresolved > 0) {
+    return `- 失败路线里有 ${historicalUnresolved} 条早于当前目标的未解决失败；不要直接重跑，先确认是否与当前待办有关。`
+  }
+  return null
+}
+
 function isIncomplete(todo: TodoItem): boolean {
   return todo.status !== 'completed'
 }
@@ -255,7 +366,7 @@ export function buildRecoveryBrief(ctx: PackContext): RecoveryBrief {
     completedEvidence.push(
       `- 观察到退出码 0 的验证命令：${verifiedCommands
         .slice(-8)
-        .map((t) => `\`${cap(commandOf(t), 160)}\` [T:${t.callId || t.id}]`)
+        .map((t) => `\`${cap(oneLine(commandOf(t)), 160)}\` [T:${t.callId || t.id}]`)
         .join('；')}`
     )
   }
@@ -263,21 +374,29 @@ export function buildRecoveryBrief(ctx: PackContext): RecoveryBrief {
     completedEvidence.push('没有捕获到可核对的文件变更、完成待办或退出码 0 的验证命令。')
   }
 
-  const failed = [...failedTools].sort((a, b) => a.time - b.time)
+  const failureRecords = classifyFailures(tools, goalSelection.goal?.time || 0)
+  const byCommand = new Map<string, FailureRecord>()
+  for (const record of failureRecords) {
+    const key = record.normalized || `${record.item.toolName}|${record.command}`
+    byCommand.set(key, record)
+  }
   const failedLines: string[] = []
-  const seen = new Set<string>()
-  for (const item of failed) {
-    const cmd = commandOf(item)
-    const key = `${item.toolName}|${cmd}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    const laterSuccess = tools.some(
-      (t) => t.time > item.time && commandOf(t) === cmd && t.exitCode === 0 && t.status === 'completed'
-    )
+  for (const record of [...byCommand.values()].sort((a, b) => a.item.time - b.item.time)) {
+    const item = record.item
+    const command = oneLine(record.command)
+    const shown =
+      command.length > 200
+        ? `${command.slice(0, 200)}…（命令已截断，完整见 [T:${item.callId || item.id}]）`
+        : command
+    const state = record.resolvedBy
+      ? `后来同类命令成功 [T:${record.resolvedBy.callId || record.resolvedBy.id}]，疑似已解决`
+      : record.afterGoal
+        ? '当前目标内失败，仍未解决'
+        : '历史失败（早于当前目标），不建议直接重跑'
     failedLines.push(
-      `- ${iso(item.time)} \`${cap(cmd || item.toolName || '', 200)}\` [T:${item.callId || item.id}]：${
+      `- ${iso(item.time)} \`${shown || item.toolName || ''}\` [T:${item.callId || item.id}]：${
         item.status === 'error' ? '工具报错' : `退出码 ${item.exitCode}`
-      }${laterSuccess ? '；同一命令后来出现过退出码 0，疑似已解决' : '；没有观察到后来成功，按未解决处理'}`
+      }；${state}`
     )
   }
   if ((ctx.modelErrorCount || 0) > 0) {
@@ -287,6 +406,11 @@ export function buildRecoveryBrief(ctx: PackContext): RecoveryBrief {
     failedLines.push(`- 用户取消过 ${cancelled.length} 个 turn；取消前的路线不应默认继续。`)
   }
   if (!failedLines.length) failedLines.push('没有捕获到失败的工具调用、模型错误或用户取消。')
+  const historicalUnresolved = failureRecords.filter((record) => !record.resolvedBy && !record.afterGoal).length
+  const recommendedFailure = selectRecommendedFailure(failureRecords, {
+    incompleteTodos,
+    changedFiles: changedDuring.map((file) => file.path)
+  })
 
   const workspaceLines: string[] = []
   if (!ctx.git.available) {
@@ -326,12 +450,8 @@ export function buildRecoveryBrief(ctx: PackContext): RecoveryBrief {
   } else {
     nextLines.push('- 没有未完成的待办记录；先核对下面的失败路线和工作区对照。')
   }
-  const unresolved = failed.find(
-    (item) => !tools.some((t) => t.time > item.time && commandOf(t) === commandOf(item) && t.exitCode === 0 && t.status === 'completed')
-  )
-  if (unresolved) {
-    nextLines.push(`- 先复现或绕开最近一条未解决失败：\`${cap(commandOf(unresolved) || unresolved.toolName || '', 160)}\``)
-  }
+  const guidance = failureGuidance(recommendedFailure, historicalUnresolved)
+  if (guidance) nextLines.push(guidance)
   nextLines.push('- 读 `changes/status.txt` 与 `changes/diff-*.patch`，确认当前工作区与记录是否一致。')
   nextLines.push('- 逐条核查“收尾陈述”，不要把执行者自述当成已验证结果。')
 
