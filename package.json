@@ -17,7 +17,8 @@
     "smoke": "node scripts/smoke.mjs",
     "demo": "node scripts/run-real-demo.mjs",
     "handoff-exp": "node scripts/run-handoff-exp.mjs",
-    "handoff-real": "node scripts/run-handoff-real.mjs"
+    "handoff-real": "node scripts/run-handoff-real.mjs",
+    "handoff-p02": "node scripts/run-handoff-p02.mjs"
   },
   "dependencies": {
     "archiver": "^7.0.1",
