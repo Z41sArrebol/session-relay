@@ -2500,3 +2500,25 @@ pre {
   padding-top: 9px;
   border-top: 1px solid var(--line);
 }
+
+.confidence-detail {
+  margin: 4px 0 6px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 4px;
+  padding: 5px 8px;
+  background: var(--paper-4);
+}
+
+.confidence-detail summary {
+  cursor: pointer;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.confidence-detail ul {
+  margin: 5px 0 0;
+  padding-left: 16px;
+  font-size: 10px;
+  color: var(--ink-2);
+  line-height: 1.5;
+}

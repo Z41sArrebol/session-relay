@@ -6,6 +6,7 @@ import { getGitEvidence } from '../src/main/core/git'
 import { preparePack, type PackContext } from '../src/main/core/handoff'
 import {
   buildRecoveryBrief,
+  computeConfidence,
   recoveryMarkdown,
   isFollowUpMessage,
   selectEffectiveGoal,
@@ -115,6 +116,97 @@ print(1)"`,
     const records = classifyFailures([toolItem('old-python', 'python -c "sqlite3 db.sqlite"', 100, 1, 'error')], goalTime)
     expect(selectRecommendedFailure(records, { incompleteTodos: [], changedFiles: [] })).toBeNull()
     expect(failureGuidance(null, 1)).toContain('不要直接重跑')
+  })
+})
+
+describe('confidence on a clean session', () => {
+  let cleanFixture: Fixture
+  let cleanReader: ZcodeReader
+  let cleanStore: RelayStore
+
+  beforeAll(async () => {
+    cleanFixture = createZcodeFixture()
+    cleanReader = new ZcodeReader(cleanFixture.dbPath)
+    cleanStore = new RelayStore(cleanFixture.storePath)
+    const observer = new Observer({ store: cleanStore, reader: cleanReader, logger: silentLogger, emit: () => undefined })
+    await observer.attach(cleanFixture.sessionA, cleanFixture.projectRoot)
+  })
+
+  afterAll(() => {
+    cleanReader.close()
+    cleanStore.close()
+    cleanFixture.cleanup()
+  })
+
+  it('is high when a session has evidence and no warnings', async () => {
+    const row = cleanStore.getAttached(cleanFixture.sessionA)!
+    const git = await getGitEvidence({
+      sessionId: cleanFixture.sessionA,
+      projectRoot: cleanFixture.projectRoot,
+      baseline: row.baseline,
+      live: row.live
+    })
+    const timeline = new Observer({ store: cleanStore, reader: cleanReader, logger: silentLogger, emit: () => undefined }).getTimeline(
+      cleanFixture.sessionA
+    )
+    const brief = buildRecoveryBrief({
+      row,
+      git,
+      timeline: timeline.items,
+      tokens: timeline.tokens,
+      summary: null,
+      todos: cleanStore.getTodos(cleanFixture.sessionA),
+      turns: cleanStore.getTurns(cleanFixture.sessionA),
+      modelErrorCount: cleanStore.countModelErrors(cleanFixture.sessionA)
+    })
+    expect(brief.confidence).toBe('high')
+    expect(brief.confidenceScore).toBeGreaterThanOrEqual(90)
+    expect(brief.confidenceReasons.join(' ')).toContain('门槛')
+  })
+})
+
+describe('confidence score and gates', () => {
+  const allGood = {
+    gitAvailable: true,
+    hasBaseline: true,
+    dangerCount: 0,
+    warnCount: 0,
+    usableGoal: true,
+    verifiedEvidence: true,
+    missingWritten: 0,
+    syncError: false,
+    running: false,
+    staleTodos: false
+  }
+
+  it('is high only when every evidence gate passes', () => {
+    const result = computeConfidence(allGood)
+    expect(result.confidence).toBe('high')
+    expect(result.score).toBeGreaterThanOrEqual(90)
+    expect(result.reasons.join(' ')).toContain('门槛')
+  })
+
+  it('drops below high on any single gate', () => {
+    for (const patch of [
+      { hasBaseline: false },
+      { usableGoal: false },
+      { verifiedEvidence: false },
+      { missingWritten: 1 },
+      { staleTodos: true },
+      { running: true },
+      { warnCount: 1 },
+      { dangerCount: 1 }
+    ]) {
+      const result = computeConfidence({ ...allGood, ...patch })
+      expect(result.confidence).not.toBe('high')
+    }
+  })
+
+  it('explains why it is not high', () => {
+    const result = computeConfidence({ ...allGood, hasBaseline: false, verifiedEvidence: false })
+    expect(result.confidence).not.toBe('high')
+    expect(result.reasons.join(' ')).toContain('缺少接入时基线')
+    expect(result.reasons.join(' ')).toContain('没有可核对的完成证据')
   })
 })
 

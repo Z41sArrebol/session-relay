@@ -210,6 +210,68 @@ export function failureGuidance(record: FailureRecord | null, historicalUnresolv
   return null
 }
 
+export interface ConfidenceInput {
+  gitAvailable: boolean
+  hasBaseline: boolean
+  dangerCount: number
+  warnCount: number
+  usableGoal: boolean
+  verifiedEvidence: boolean
+  missingWritten: number
+  syncError: boolean
+  running: boolean
+  staleTodos: boolean
+}
+
+export interface ConfidenceResult {
+  confidence: RecoveryBrief['confidence']
+  score: number
+  reasons: string[]
+}
+
+/**
+ * Confidence is a gate plus a score, not "Git exists". High requires every
+ * evidence gate to pass and no warning/danger signal. Reasons are returned so
+ * the UI and HANDOFF can say why the label is what it is.
+ */
+export function computeConfidence(input: ConfidenceInput): ConfidenceResult {
+  let score = 100
+  const reasons: string[] = []
+  const deduct = (amount: number, reason: string): void => {
+    score -= amount
+    reasons.push(`-${amount} ${reason}`)
+  }
+
+  if (!input.gitAvailable) deduct(35, '无法读取 Git 工作区')
+  if (!input.hasBaseline) deduct(25, '缺少接入时基线')
+  if (!input.usableGoal) deduct(20, '没有找到实质性目标，或目标只是控制指令')
+  if (!input.verifiedEvidence) deduct(20, '没有可核对的完成证据（文件变更、完成待办、退出码 0 的验证命令）')
+  if (input.dangerCount) deduct(40, `危险信号 ${input.dangerCount} 条`)
+  if (input.warnCount) deduct(Math.min(30, input.warnCount * 8), `警告信号 ${input.warnCount} 条`)
+  if (input.missingWritten) deduct(25, `工具写过但当前不存在的文件 ${input.missingWritten} 个`)
+  if (input.syncError) deduct(25, '最近一次读取失败')
+  if (input.running) deduct(10, '会话仍在执行，结果是进行中快照')
+  if (input.staleTodos) deduct(15, '未完成待办长时间没有更新，可能已过期')
+
+  score = Math.max(0, score)
+  const gatesOk =
+    input.gitAvailable &&
+    input.hasBaseline &&
+    input.usableGoal &&
+    input.verifiedEvidence &&
+    input.dangerCount === 0 &&
+    input.warnCount === 0 &&
+    input.missingWritten === 0 &&
+    !input.syncError &&
+    !input.running &&
+    !input.staleTodos
+  const confidence = gatesOk && score >= 90 ? 'high' : score >= 60 ? 'medium' : 'low'
+  if (confidence === 'high') {
+    reasons.unshift('已满足 Git/基线/目标/证据/一致性门槛，且没有警告或危险信号')
+  }
+  return { confidence, score, reasons }
+}
+
 function isIncomplete(todo: TodoItem): boolean {
   return todo.status !== 'completed'
 }
@@ -455,12 +517,30 @@ export function buildRecoveryBrief(ctx: PackContext): RecoveryBrief {
   nextLines.push('- 读 `changes/status.txt` 与 `changes/diff-*.patch`，确认当前工作区与记录是否一致。')
   nextLines.push('- 逐条核查“收尾陈述”，不要把执行者自述当成已验证结果。')
 
-  const confidence: RecoveryBrief['confidence'] =
-    ctx.git.available && ctx.row.baseline.info.hasBaseline && !signals.some((s) => s.level === 'danger')
-      ? 'high'
-      : ctx.git.available || ctx.row.baseline.info.hasBaseline
-        ? 'medium'
-        : 'low'
+  const lastActivityAt = ctx.row.live.lastActivityAt || 0
+  const staleTodos =
+    incompleteTodos.length > 0 &&
+    lastActivityAt > 0 &&
+    incompleteTodos.some((todo) => lastActivityAt - todo.updatedAt > 30 * 60 * 1000)
+  const verifiedEvidence =
+    ctx.git.commitsSinceBaseline.length > 0 ||
+    changedDuring.length > 0 ||
+    completedTodos.length > 0 ||
+    verifiedCommands.length > 0
+  const dangerCount = signals.filter((signal) => signal.level === 'danger').length
+  const warnCount = signals.filter((signal) => signal.level === 'warn').length
+  const confidenceResult = computeConfidence({
+    gitAvailable: ctx.git.available,
+    hasBaseline: ctx.row.baseline.info.hasBaseline,
+    dangerCount,
+    warnCount,
+    usableGoal: Boolean(goalSelection.goal) && !goalSelection.goalIsFollowUp,
+    verifiedEvidence,
+    missingWritten: missingWritten.length,
+    syncError: Boolean(ctx.row.syncError),
+    running: ctx.row.live.state === 'running',
+    staleTodos
+  })
 
   const goal = goalSelection.goal
   const trailingGoalNote = goalSelection.trailing.length
@@ -476,7 +556,9 @@ export function buildRecoveryBrief(ctx: PackContext): RecoveryBrief {
   return {
     sessionId: ctx.row.sessionId,
     generatedAt: Date.now(),
-    confidence,
+    confidence: confidenceResult.confidence,
+    confidenceScore: confidenceResult.score,
+    confidenceReasons: confidenceResult.reasons,
     signals,
     latestGoal: goal
       ? `${goalPrefix}${cap(goal.text || '', 6000)}\n\n（最后一条实质性用户要求，${iso(
@@ -503,7 +585,10 @@ export function recoveryMarkdown(brief: RecoveryBrief): string {
     '# 恢复简报',
     '',
     `- 生成时间：${iso(brief.generatedAt)}`,
-    `- 可信度：${brief.confidence}`,
+    `- 可信度：${brief.confidence}（${brief.confidenceScore}）`,
+    ...(brief.confidenceReasons.length
+      ? [`- 可信度依据：${brief.confidenceReasons.slice(0, 5).join('；')}`]
+      : []),
     `- 信号：${brief.signals.length ? brief.signals.map((s) => s.title).join('；') : '无'}`,
     '',
     '## 1. 最新目标',

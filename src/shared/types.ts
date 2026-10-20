@@ -318,7 +318,12 @@ export interface ManifestPreview {
   privacyNotice: string
   mode: RelayMode
   tokenNote: string
-  recovery: { confidence: 'high' | 'medium' | 'low'; signals: RecoverySignal[] }
+  recovery: {
+    confidence: 'high' | 'medium' | 'low'
+    confidenceScore: number
+    confidenceReasons: string[]
+    signals: RecoverySignal[]
+  }
 }
 
 export interface TodoItem {
@@ -340,6 +345,8 @@ export interface RecoveryBrief {
   sessionId: string
   generatedAt: number
   confidence: 'high' | 'medium' | 'low'
+  confidenceScore: number
+  confidenceReasons: string[]
   signals: RecoverySignal[]
   latestGoal: string
   olderRequirements: string

@@ -366,7 +366,10 @@ function buildMarkdown(
   }
   lines.push('## 0.2 恢复简报（接手先看）')
   lines.push('')
-  lines.push(`- 可信度：${recovery.confidence}`)
+  lines.push(`- 可信度：${recovery.confidence}（${recovery.confidenceScore}）`)
+  if (recovery.confidenceReasons.length) {
+    lines.push(`- 可信度依据：${recovery.confidenceReasons.slice(0, 5).join('；')}`)
+  }
   lines.push(
     `- 信号：${
       recovery.signals.length
@@ -462,7 +465,7 @@ function buildManifestBase(ctx: PackContext, request: PackRequest, captureIso: s
     privacyNotice:
       '本包只包含选定文件与 diff。敏感信息检测为启发式，不能保证 100% 覆盖；发送前请预览并排除不应外发的内容。',
     mode: request.mode,
-    recovery: { confidence: 'low', signals: [] },
+    recovery: { confidence: 'low', confidenceScore: 0, confidenceReasons: [], signals: [] },
     tokenNote:
       'Token 来自 model_usage（按模型调用尝试累计）。input 含 cache_read，output 含 reasoning；缓存与推理单独展示，不重复相加。'
   }
@@ -616,7 +619,12 @@ export async function preparePack(ctx: PackContext, request: PackRequest): Promi
   const manifest = buildManifestBase(ctx, request, captureIso)
   manifest.excluded = excluded
   manifest.sensitiveHits = sensitiveHits
-  manifest.recovery = { confidence: recovery.confidence, signals: recovery.signals }
+  manifest.recovery = {
+    confidence: recovery.confidence,
+    confidenceScore: recovery.confidenceScore,
+    confidenceReasons: recovery.confidenceReasons,
+    signals: recovery.signals
+  }
   return { entries, excluded, sensitiveHits, warnings, markdown, manifest, mode: request.mode, totalBytes, recovery }
 }
 

@@ -80,12 +80,26 @@ function RecoveryTab(props: Props): React.ReactElement {
   return (
     <div className="recovery">
       <div className="recovery-top">
-        <span className={`conf conf-${recovery.confidence}`}>可信度 {confidence}</span>
+        <span
+          className={`conf conf-${recovery.confidence}`}
+          title={recovery.confidenceReasons.join('\n') || '没有额外依据'}
+        >
+          可信度 {confidence} · {recovery.confidenceScore}
+        </span>
         <span className="muted">{formatDateTime(recovery.generatedAt)}</span>
         <button className="text-btn" onClick={props.onCopyRecovery}>
           <IconCopy size={11} /> 复制简报
         </button>
       </div>
+      <details className="confidence-detail">
+        <summary>可信度依据</summary>
+        <ul>
+          {(recovery.confidenceReasons.length ? recovery.confidenceReasons : ['没有额外扣分依据']).map((reason) => (
+            <li key={reason}>{reason}</li>
+          ))}
+        </ul>
+      </details>
+
       <p className="recovery-lede">
         这份简报回答：最新目标、已完成证据、失败过的路线、工作区是否一致、接手先做什么。由确定性规则生成，未调用模型。
       </p>
