@@ -77,6 +77,11 @@ export class ConnectorService {
   }
 
   private async findClaude(force = false): Promise<{ path: string | null; version: string | null }> {
+    const override = process.env.SESSION_RELAY_CLAUDE_PATH
+    if (override && override.trim() && existsSync(override.trim())) {
+      const run = await this.runClaude(override.trim(), ['--version'], null, this.userDataDir, 20_000)
+      return { path: override.trim(), version: run.ok ? run.stdout.trim().split(/\r?\n/)[0] || null : null }
+    }
     if (!force && Date.now() - this.claudeCache.checkedAt < 60_000) {
       return { path: this.claudeCache.path, version: this.claudeCache.version }
     }
@@ -114,24 +119,18 @@ export class ConnectorService {
     return new Promise((resolve) => {
       const started = Date.now()
       const isCmd = /\.(cmd|bat)$/i.test(cliPath)
-      const command = isCmd
-        ? `${quoteWindowsArg(cliPath)} ${args.map(quoteWindowsArg).join(' ')}`
-        : null
       let child
       try {
-        child = isCmd
-          ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${command}"`], {
-              cwd,
-              windowsHide: true,
-              env: { ...process.env, NO_COLOR: '1' },
-              stdio: ['pipe', 'pipe', 'pipe']
-            })
-          : spawn(cliPath, args, {
-              cwd,
-              windowsHide: true,
-              env: { ...process.env, NO_COLOR: '1' },
-              stdio: ['pipe', 'pipe', 'pipe']
-            })
+        // Windows .cmd/.bat shims cannot be spawned without a shell. The
+        // arguments are program-controlled constants and a verified path; the
+        // user prompt goes over stdin, never into the command line.
+        child = spawn(cliPath, args, {
+          cwd,
+          windowsHide: true,
+          env: { ...process.env, NO_COLOR: '1' },
+          stdio: ['pipe', 'pipe', 'pipe'],
+          shell: isCmd
+        })
       } catch (error) {
         resolve({
           ok: false,

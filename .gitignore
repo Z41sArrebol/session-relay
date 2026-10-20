@@ -6,3 +6,4 @@ out-types/
 .DS_Store
 docs/demo/real-handoff-*
 docs/demo/real-handoff-check.json
+docs/demo/handoff-experiment/
