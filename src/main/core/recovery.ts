@@ -424,6 +424,16 @@ export function buildRecoveryBrief(ctx: PackContext): RecoveryBrief {
   const verifiedCommands = tools.filter(
     (t) => isVerification(commandOf(t)) && t.exitCode === 0 && (t.status === 'completed' || t.status === undefined)
   )
+  // The last write/edit in the session must not be newer than the last
+  // successful verification, or the verification cannot prove the final state.
+  const lastEditAt = Math.max(
+    0,
+    ...tools
+      .filter((t) => ['Write', 'Edit', 'MultiEdit'].includes(t.toolName || '') && t.status === 'completed')
+      .map((t) => t.time)
+  )
+  const lastVerifiedAt = verifiedCommands.length ? verifiedCommands[verifiedCommands.length - 1].time : 0
+  const verificationPrecedesEdits = lastEditAt > 0 && lastVerifiedAt > 0 && lastEditAt > lastVerifiedAt
   if (verifiedCommands.length) {
     completedEvidence.push(
       `- 观察到退出码 0 的验证命令：${verifiedCommands
@@ -431,6 +441,17 @@ export function buildRecoveryBrief(ctx: PackContext): RecoveryBrief {
         .map((t) => `\`${cap(oneLine(commandOf(t)), 160)}\` [T:${t.callId || t.id}]`)
         .join('；')}`
     )
+  }
+  if (verificationPrecedesEdits) {
+    completedEvidence.push(
+      `- ⚠️ 最后一次成功验证（${iso(lastVerifiedAt)}）早于最后一次文件写入（${iso(lastEditAt)}），不能证明最终状态可用。`
+    )
+    signals.push({
+      id: 'verification-stale',
+      level: 'warn',
+      title: '最后成功验证早于最后文件写入',
+      detail: '退出码 0 的验证发生在后续编辑之前，不能证明当前工作区可用。'
+    })
   }
   if (!completedEvidence.length) {
     completedEvidence.push('没有捕获到可核对的文件变更、完成待办或退出码 0 的验证命令。')

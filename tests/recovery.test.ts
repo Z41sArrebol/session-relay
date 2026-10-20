@@ -51,6 +51,74 @@ function userItem(id: string, text: string, time: number): TimelineItem {
   }
 }
 
+describe('verification freshness', () => {
+  const fakeCtx = {
+    row: {
+      sessionId: 'sess_v',
+      projectRoot: 'C:/tmp/project',
+      baseline: { info: { id: 'b', capturedAt: 1, hasBaseline: true, head: 'h', gitRoot: 'C:/tmp/project', note: '' }, files: {}, statusText: '' },
+      live: { state: 'idle', label: 'idle', detail: '', asOf: 1, runningTurns: 0, runningTools: 0, lastActivityAt: 1000 },
+      syncError: null,
+      title: 't',
+      directory: 'C:/tmp/project',
+      model: null,
+      attachedAt: 1,
+      paused: false,
+      selectedFiles: null,
+      summary: null,
+      lastSyncAt: 1,
+      eventCount: 0,
+      sourceDb: 'db'
+    },
+    git: {
+      sessionId: 'sess_v',
+      available: true,
+      reason: null,
+      capturedAt: 1,
+      projectRoot: 'C:/tmp/project',
+      gitRoot: 'C:/tmp/project',
+      branch: 'main',
+      head: 'h',
+      baseline: { id: 'b', capturedAt: 1, hasBaseline: true, head: 'h', gitRoot: 'C:/tmp/project', note: '' },
+      attribution: 'partial',
+      attributionNote: '',
+      buckets: { staged: [], unstaged: [], untracked: [] },
+      commitsSinceBaseline: [],
+      statusText: '',
+      diffStat: { staged: '', unstaged: '' },
+      snapshotState: 'idle'
+    },
+    timeline: [
+      { id: 'u1', sessionId: 'sess_v', kind: 'user', time: 100, messageId: 'u1', turnId: 'u1', sequence: 0, text: '实现功能' },
+      { ...toolItem('verify', 'npm test', 200, 0, 'completed') },
+      { ...toolItem('write', 'C:/tmp/project/a.ts', 300, null, 'completed'), toolName: 'Write', input: { file_path: 'C:/tmp/project/a.ts' } }
+    ] as TimelineItem[],
+    tokens: { input: 1, output: 1, reasoning: 0, cacheRead: 0, cacheWrite: 0, calls: 1 },
+    summary: null,
+    todos: [],
+    turns: [],
+    modelErrorCount: 0
+  } as unknown as PackContext
+
+  it('flags a successful verification that happened before the last edit', () => {
+    const brief = buildRecoveryBrief(fakeCtx)
+    expect(brief.signals.some((s) => s.id === 'verification-stale')).toBe(true)
+    expect(brief.completedEvidence).toContain('早于最后一次文件写入')
+  })
+
+  it('does not flag verification that follows the last edit', () => {
+    const ctx = {
+      ...fakeCtx,
+      timeline: [
+        { ...toolItem('write', 'C:/tmp/project/a.ts', 200, null, 'completed'), toolName: 'Write', input: { file_path: 'C:/tmp/project/a.ts' } },
+        { ...toolItem('verify', 'npm test', 300, 0, 'completed') }
+      ] as TimelineItem[]
+    }
+    const brief = buildRecoveryBrief(ctx)
+    expect(brief.signals.some((s) => s.id === 'verification-stale')).toBe(false)
+  })
+})
+
 describe('failure guidance', () => {
   const goalTime = 500
   const tools = [

@@ -16,7 +16,8 @@
     "test:e2e": "node scripts/run-e2e.mjs",
     "smoke": "node scripts/smoke.mjs",
     "demo": "node scripts/run-real-demo.mjs",
-    "handoff-exp": "node scripts/run-handoff-exp.mjs"
+    "handoff-exp": "node scripts/run-handoff-exp.mjs",
+    "handoff-real": "node scripts/run-handoff-real.mjs"
   },
   "dependencies": {
     "archiver": "^7.0.1",

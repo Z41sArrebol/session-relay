@@ -487,14 +487,23 @@ export async function preparePack(ctx: PackContext, request: PackRequest): Promi
   const allFiles = [...ctx.git.buckets.staged, ...ctx.git.buckets.unstaged, ...ctx.git.buckets.untracked]
   const byPath = new Map<string, GitFile>()
   for (const f of allFiles) byPath.set(f.path, f)
-  const selected: GitFile[] = []
-  for (const p of request.filePaths) {
-    const f = byPath.get(p)
-    if (!f) {
-      warnings.push(`选中的文件不在当前 Git 变更中，已跳过：${p}`)
-      continue
+  let selected: GitFile[] = []
+  if (request.filePaths.length === 0) {
+    // No explicit selection: default to the current Git change set. Without
+    // this the pack has empty diffs and the receiver cannot see what changed.
+    selected = allFiles.filter((f) => f.selectable && !f.sensitive)
+    if (selected.length) {
+      warnings.push(`未指定交接文件，已默认包含当前 Git 变更的 ${selected.length} 个可交接文件（不含敏感/构建产物）。`)
     }
-    selected.push(f)
+  } else {
+    for (const p of request.filePaths) {
+      const f = byPath.get(p)
+      if (!f) {
+        warnings.push(`选中的文件不在当前 Git 变更中，已跳过：${p}`)
+        continue
+      }
+      selected.push(f)
+    }
   }
 
   // Diffs first: they are the primary evidence for tracked modifications.
